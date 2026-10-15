@@ -1,0 +1,18 @@
+# Web framework & server
+fastapi==0.115.6
+uvicorn[standard]==0.32.1        # pulls uvloop + httptools on Linux
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# Upstream HTTP client (HTTP/2 via h2)
+httpx[http2]==0.28.1
+
+# State, caching, rate limiting
+redis==5.2.1
+
+# Audit event streaming
+aiokafka==0.12.0
+
+# Persistence
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0

@@ -1,0 +1,102 @@
+# Local Gopniya stack: gateway + audit sink + PostgreSQL + Redis + Kafka (KRaft).
+#
+#   export OPENAI_API_KEY=sk-...        # upstream provider key
+#   docker compose up --build
+#   curl localhost:8000/v1/chat/completions -H "Authorization: Bearer gpn-dev-key" ...
+
+x-app-env: &app-env
+  GOPNIYA_ENVIRONMENT: dev
+  GOPNIYA_LOG_LEVEL: INFO
+  GOPNIYA_DATABASE_URL: postgresql+asyncpg://gopniya:gopniya@postgres:5432/gopniya
+  GOPNIYA_REDIS_URL: redis://redis:6379/0
+  GOPNIYA_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  GOPNIYA_UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-https://api.openai.com/v1}
+  GOPNIYA_UPSTREAM_API_KEY: ${OPENAI_API_KEY:-}
+  GOPNIYA_FALLBACK_BASE_URL: ${FALLBACK_BASE_URL:-}
+  GOPNIYA_FALLBACK_API_KEY: ${FALLBACK_API_KEY:-}
+  GOPNIYA_FALLBACK_MODEL: ${FALLBACK_MODEL:-}
+  GOPNIYA_BOOTSTRAP_API_KEY: ${GOPNIYA_BOOTSTRAP_API_KEY:-gpn-dev-key}
+
+services:
+  gateway:
+    build: .
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  audit-sink:
+    build: .
+    command: ["python", "-m", "app.services"]
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gopniya
+      POSTGRES_PASSWORD: gopniya
+      POSTGRES_DB: gopniya
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gopniya -d gopniya"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    # volatile-lru: only keys with a TTL (all of ours) are evicted under
+    # memory pressure. No persistence: buckets and cache are ephemeral.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.8.1
+    ports:
+      - "29092:29092"   # for clients on the host
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+volumes:
+  pg-data:
